@@ -1,4 +1,4 @@
-# Memory Game
+# SimpleMemoryGame
 
 SwiftUI で作成した神経衰弱ゲームです。  
 難易度切り替え、プレイ時間計測、履歴表示、カード裏面デザイン選択に対応しています。
@@ -26,7 +26,7 @@ SwiftUI で作成した神経衰弱ゲームです。
 
 ## 実行方法
 
-1. `Cards.xcodeproj` を Xcode で開く
+1. `SimpleMemoryGame.xcodeproj` を Xcode で開く
 2. 実行先を選ぶ
 3. `Run` でビルド・起動する
 
@@ -57,7 +57,7 @@ SwiftUI で作成した神経衰弱ゲームです。
 
 カード表面画像ファイルは以下に配置しています。
 
-- `Cards/Cards/CardImages/`
+- `SimpleMemoryGame/CardImages/`
 
 対象例:
 
@@ -73,13 +73,13 @@ SwiftUI で作成した神経衰弱ゲームです。
 
 ## プロジェクト構成
 
-- `Cards/Cards/ContentView.swift`
+- `SimpleMemoryGame/ContentView.swift`
   - メイン画面、ゲームロジック、履歴表示
-- `Cards/Cards/CardsApp.swift`
+- `SimpleMemoryGame/SimpleMemoryGameApp.swift`
   - アプリ起動エントリ
-- `Cards/Cards/CardImages/`
+- `SimpleMemoryGame/CardImages/`
   - カード画像
-- `Cards/Cards/Assets.xcassets`
+- `SimpleMemoryGame/Assets.xcassets`
   - アセットカタログ
 
 ## 備考

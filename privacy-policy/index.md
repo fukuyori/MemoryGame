@@ -26,4 +26,4 @@ The app does not knowingly collect personal information from children.
 
 If you have questions about this Privacy Policy, please contact:
 
-- Email: your-email@example.com
+- Email: self@spumoni.org

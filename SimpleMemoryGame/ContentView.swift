@@ -1,24 +1,16 @@
 //
 //  ContentView.swift
-//  Cards
+//  SimpleMemoryGame
 //
 //  Created by 福寄典明 on 2026/04/14.
 //
 
 import SwiftUI
 import Combine
-
-#if canImport(UIKit)
-import UIKit
-private typealias PlatformImage = UIImage
-#elseif canImport(AppKit)
-import AppKit
-private typealias PlatformImage = NSImage
-#endif
+import WebKit
 
 struct ContentView: View {
     @AppStorage("gameHistoryV2") private var gameHistoryData = ""
-    @AppStorage("selectedCardBackStyle") private var selectedCardBackStyleRawValue = ""
     @AppStorage("selectedDifficulty") private var selectedDifficultyRawValue = GameDifficulty.intermediate.rawValue
     @State private var difficulty: GameDifficulty
     @State private var cards: [GameCard]
@@ -30,12 +22,16 @@ struct ContentView: View {
     @State private var elapsedTime: TimeInterval = 0
     @State private var hasRecordedCurrentGame = false
     @State private var currentPage = 0
-    @State private var isShowingBackStylePicker = false
+    @State private var cardBackStyle: CardBackStyle
+    @State private var completionMessage: String?
+    @State private var completionMessageTone: CompletionMessageTone = .neutral
+    @State private var showsConfetti = false
 
     init() {
         let savedDifficulty = GameDifficulty(rawValue: UserDefaults.standard.string(forKey: "selectedDifficulty") ?? "") ?? .intermediate
         _difficulty = State(initialValue: savedDifficulty)
         _cards = State(initialValue: GameCard.makeDeck(pairCount: savedDifficulty.pairCount))
+        _cardBackStyle = State(initialValue: CardBackStyle.randomStyle())
     }
 
     var body: some View {
@@ -79,9 +75,10 @@ struct ContentView: View {
                                 } label: {
                                     MemoryCardView(
                                         card: card,
+                                        width: layout.cardWidth,
                                         height: layout.cardHeight,
                                         isHighlighted: recentlyMatchedIndices.contains(index),
-                                        backStyle: selectedBackStyle
+                                        backStyle: cardBackStyle
                                     )
                                 }
                                 .buttonStyle(.plain)
@@ -142,19 +139,21 @@ struct ContentView: View {
             .tabViewStyle(.page(indexDisplayMode: .automatic))
             #endif
 
-            if shouldShowBackStylePicker {
-                CardBackPickerOverlay(
-                    selectedStyle: selectedBackStyle,
-                    onSelect: { style in
-                        selectedCardBackStyleRawValue = style.rawValue
-                        isShowingBackStylePicker = false
-                        resetGame()
-                    }
+            if showsConfetti {
+                ConfettiOverlay()
+                    .allowsHitTesting(false)
+            }
+
+            if let completionMessage {
+                CompletionMessageBanner(
+                    message: completionMessage,
+                    tone: completionMessageTone
                 )
-                .transition(.opacity)
+                .padding(.top, 24)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: shouldShowBackStylePicker)
+        .animation(.easeInOut(duration: 0.25), value: completionMessage != nil)
         .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { now in
             guard !hasRecordedCurrentGame else { return }
             elapsedTime = now.timeIntervalSince(gameStartDate)
@@ -192,14 +191,6 @@ struct ContentView: View {
 
     private var recentHistory: [GameResult] {
         Array(gameHistory.prefix(10))
-    }
-
-    private var selectedBackStyle: CardBackStyle {
-        CardBackStyle(rawValue: selectedCardBackStyleRawValue) ?? .mondrian
-    }
-
-    private var shouldShowBackStylePicker: Bool {
-        selectedCardBackStyleRawValue.isEmpty || isShowingBackStylePicker
     }
 
     private func flipCard(at index: Int) {
@@ -250,6 +241,7 @@ struct ContentView: View {
 
     private func resetGame(for difficulty: GameDifficulty) {
         cards = GameCard.makeDeck(pairCount: difficulty.pairCount)
+        cardBackStyle = CardBackStyle.randomStyle()
         selectedIndices.removeAll()
         recentlyMatchedIndices.removeAll()
         isResolvingTurn = false
@@ -257,33 +249,42 @@ struct ContentView: View {
         gameStartDate = Date()
         elapsedTime = 0
         hasRecordedCurrentGame = false
+        completionMessage = nil
+        showsConfetti = false
     }
 
     private func gameLayout(in size: CGSize) -> GameLayout {
+        let isLandscape = size.width > size.height
         let horizontalPadding: CGFloat = 20
         let verticalPadding: CGFloat = 24
-        let topAreaHeight: CGFloat = 92
-        let buttonHeight: CGFloat = 52
-        let sectionSpacing: CGFloat = 14
-        let cardSpacing: CGFloat = 5
+        let topAreaHeight: CGFloat = 78
+        let buttonHeight: CGFloat = 48
+        let sectionSpacing: CGFloat = 12
+        let cardSpacing: CGFloat = size.height < 760 ? 4 : 5
         let totalCards = cards.count
 
-        let columnsCount = difficulty.columnCount
+        let columnsCount = difficulty.columnCount(isLandscape: isLandscape)
         let rowsCount = Int(ceil(Double(totalCards) / Double(columnsCount)))
-        let availableWidth = size.width - horizontalPadding
-        let availableHeight = size.height - verticalPadding - topAreaHeight - buttonHeight - sectionSpacing
+        let availableWidth = max(size.width - horizontalPadding, 0)
+        let availableHeight = max(size.height - verticalPadding - topAreaHeight - buttonHeight - sectionSpacing, 0)
         let totalHorizontalSpacing = CGFloat(max(columnsCount - 1, 0)) * cardSpacing
         let totalVerticalSpacing = CGFloat(max(rowsCount - 1, 0)) * cardSpacing
-        let cardWidth = max((availableWidth - totalHorizontalSpacing) / CGFloat(columnsCount), 64)
-        let cardHeight = max((availableHeight - totalVerticalSpacing) / CGFloat(rowsCount), 98)
-        let fittedHeight = min(cardHeight, cardWidth * 1.72)
-        let columns = Array(repeating: GridItem(.flexible(), spacing: cardSpacing), count: columnsCount)
+        let widthDrivenCardWidth = (availableWidth - totalHorizontalSpacing) / CGFloat(columnsCount)
+        let heightDrivenCardHeight = (availableHeight - totalVerticalSpacing) / CGFloat(rowsCount)
+        let aspectRatio: CGFloat = 1.72
+        let fittedHeight = min(heightDrivenCardHeight, widthDrivenCardWidth * aspectRatio)
+        let fittedWidth = min(widthDrivenCardWidth, fittedHeight / aspectRatio)
+        let safeCardWidth = max(fittedWidth, 40)
+        let safeCardHeight = max(fittedHeight, 68)
+        let columns = Array(repeating: GridItem(.fixed(safeCardWidth), spacing: cardSpacing), count: columnsCount)
 
-        return GameLayout(columns: columns, spacing: cardSpacing, cardHeight: fittedHeight)
+        return GameLayout(columns: columns, spacing: cardSpacing, cardWidth: safeCardWidth, cardHeight: safeCardHeight)
     }
 
     private func recordGameIfNeeded() {
         guard !hasRecordedCurrentGame else { return }
+
+        let previousHistory = gameHistory.filter { $0.difficulty == difficulty }
 
         let result = GameResult(
             playedAt: Date(),
@@ -300,10 +301,65 @@ struct ContentView: View {
 
         gameHistoryData = encoded
         hasRecordedCurrentGame = true
+        showCompletionFeedback(for: result, previousHistory: previousHistory)
     }
 
     private func clearHistory() {
         gameHistoryData = ""
+    }
+
+    private func showCompletionFeedback(for result: GameResult, previousHistory: [GameResult]) {
+        let feedback = completionFeedback(for: result, previousHistory: previousHistory)
+        completionMessage = feedback?.message
+        completionMessageTone = feedback?.tone ?? .neutral
+        showsConfetti = feedback?.tone == .celebration
+
+        guard feedback != nil else { return }
+
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            completionMessage = nil
+            showsConfetti = false
+        }
+    }
+
+    private func completionFeedback(for result: GameResult, previousHistory: [GameResult]) -> CompletionFeedback? {
+        if previousHistory.count >= 1 {
+            if let previousBestMoves = previousHistory.map(\.moves).min(),
+               result.moves < previousBestMoves {
+                return CompletionFeedback(message: "おめでとう！　最小手数が更新されました！", tone: .celebration)
+            }
+
+            if let previousBestDuration = previousHistory.map(\.duration).min(),
+               result.duration < previousBestDuration {
+                return CompletionFeedback(message: "おめでとう！　最短時間が更新されました！", tone: .celebration)
+            }
+
+            if let previousWorstMoves = previousHistory.map(\.moves).max(),
+               result.moves > previousWorstMoves {
+                return CompletionFeedback(message: "最大手数が更新されました。", tone: .warning)
+            }
+
+            if let previousWorstDuration = previousHistory.map(\.duration).max(),
+               result.duration > previousWorstDuration {
+                return CompletionFeedback(message: "最大時間が更新されました。", tone: .warning)
+            }
+        }
+
+        if previousHistory.count >= 2 {
+            let averageMoves = Double(previousHistory.map(\.moves).reduce(0, +)) / Double(previousHistory.count)
+            let averageDuration = previousHistory.map(\.duration).reduce(0, +) / Double(previousHistory.count)
+
+            if Double(result.moves) < averageMoves, result.duration < averageDuration {
+                return CompletionFeedback(message: "いい調子です！", tone: .positive)
+            }
+
+            if Double(result.moves) > averageMoves, result.duration > averageDuration {
+                return CompletionFeedback(message: "がんばって！", tone: .warning)
+            }
+        }
+
+        return nil
     }
 
     private func formattedDuration(_ duration: TimeInterval) -> String {
@@ -316,6 +372,7 @@ struct ContentView: View {
 
 private struct MemoryCardView: View {
     let card: GameCard
+    let width: CGFloat
     let height: CGFloat
     let isHighlighted: Bool
     let backStyle: CardBackStyle
@@ -347,7 +404,7 @@ private struct MemoryCardView: View {
                 .opacity(card.isFaceUp || card.isMatched ? 1 : 0)
                 .rotation3DEffect(.degrees(card.isFaceUp || card.isMatched ? 0 : -180), axis: (x: 0, y: 1, z: 0))
         }
-        .frame(maxWidth: .infinity)
+        .frame(width: width)
         .frame(height: height)
         .background(Color.white.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -368,155 +425,436 @@ private struct CardArtworkView: View {
     let name: String
 
     var body: some View {
-        Group {
-            if let image = CardImageLoader.image(named: name) {
-                cardImageView(image)
-            } else {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.white.opacity(0.12))
-                    .overlay {
-                        Text(name)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.7))
-                            .multilineTextAlignment(.center)
-                            .padding(6)
-                    }
-            }
+        if let resource = SVGCardResource(name: name) {
+            SVGCardView(resource: resource)
+                .padding(2)
+        } else if let cardFace = StandardCardFace(name: name) {
+            StandardCardFaceView(face: cardFace)
+                .padding(4)
+        } else {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.white.opacity(0.12))
+                .overlay {
+                    Text(name)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .padding(6)
+                }
+                .padding(4)
         }
-        .padding(4)
-    }
-
-    @ViewBuilder
-    private func cardImageView(_ image: PlatformImage) -> some View {
-        #if canImport(UIKit)
-        Image(uiImage: image)
-            .resizable()
-            .interpolation(.high)
-            .scaledToFit()
-        #elseif canImport(AppKit)
-        Image(nsImage: image)
-            .resizable()
-            .interpolation(.high)
-            .scaledToFit()
-        #endif
     }
 }
 
-private enum CardImageLoader {
-    static func image(named name: String) -> PlatformImage? {
-        #if canImport(UIKit)
-        if let image = UIImage(named: name) {
-            return image
+private struct SVGCardResource: Equatable {
+    let fileName: String
+
+    init?(name: String) {
+        let parts = name.split(separator: "-")
+        guard parts.count == 3 else {
+            return nil
         }
-        #elseif canImport(AppKit)
-        if let image = NSImage(named: name) {
-            return image
+
+        let suitCode: String
+        switch parts[1] {
+        case "spades":
+            suitCode = "S"
+        case "hearts":
+            suitCode = "H"
+        case "diamonds":
+            suitCode = "D"
+        case "clubs":
+            suitCode = "C"
+        default:
+            return nil
         }
-        #endif
 
-        let bundles = Bundle.allBundles + Bundle.allFrameworks
+        let rankCode: String
+        switch parts[2] {
+        case "10":
+            rankCode = "T"
+        default:
+            rankCode = String(parts[2])
+        }
 
-        for bundle in bundles {
-            #if canImport(UIKit)
-            if let image = UIImage(named: name, in: bundle, compatibleWith: nil) {
-                return image
-            }
-            #elseif canImport(AppKit)
-            if let image = bundle.image(forResource: name) {
-                return image
-            }
-            #endif
+        let candidate = "\(rankCode)\(suitCode)"
+        guard Bundle.main.url(forResource: candidate, withExtension: "svg") != nil else {
+            return nil
+        }
 
-            if let url = bundle.url(forResource: name, withExtension: "png") {
-                #if canImport(UIKit)
-                if let image = UIImage(contentsOfFile: url.path) {
-                    return image
+        fileName = candidate
+    }
+
+    var fileURL: URL? {
+        Bundle.main.url(forResource: fileName, withExtension: "svg")
+    }
+}
+
+private struct SVGCardView: UIViewRepresentable {
+    let resource: SVGCardResource
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+        webView.isUserInteractionEnabled = false
+        webView.contentMode = .scaleAspectFit
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.loadedFileName != resource.fileName,
+              let fileURL = resource.fileURL else {
+            return
+        }
+
+        context.coordinator.loadedFileName = resource.fileName
+
+        let html = """
+        <!doctype html>
+        <html>
+        <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+        <style>
+        html, body {
+          margin: 0;
+          padding: 0;
+          width: 100%;
+          height: 100%;
+          background: transparent;
+          overflow: hidden;
+        }
+        body {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        img {
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+          display: block;
+        }
+        </style>
+        </head>
+        <body>
+          <img src="\(resource.fileName).svg" />
+        </body>
+        </html>
+        """
+
+        webView.loadHTMLString(html, baseURL: fileURL.deletingLastPathComponent())
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        var loadedFileName: String?
+    }
+}
+
+private struct StandardCardFace {
+    let rank: String
+    let suit: CardSuit
+
+    init?(name: String) {
+        let parts = name.split(separator: "-")
+        guard parts.count == 3,
+              let suit = CardSuit(rawValue: String(parts[1])) else {
+            return nil
+        }
+
+        self.rank = String(parts[2])
+        self.suit = suit
+    }
+
+    var isFaceCard: Bool {
+        ["J", "Q", "K"].contains(rank)
+    }
+
+    var displayRank: String {
+        rank
+    }
+
+    var courtTitle: String {
+        switch rank {
+        case "J": "JACK"
+        case "Q": "QUEEN"
+        case "K": "KING"
+        default: rank
+        }
+    }
+
+    var courtSymbol: String {
+        switch rank {
+        case "J": "⚔"
+        case "Q": "❦"
+        case "K": "♛"
+        default: suit.symbol
+        }
+    }
+
+    var pipLayout: [CardPip] {
+        switch rank {
+        case "2":
+            return [.init(x: 0, y: 0.18), .init(x: 0, y: 0.82, isInverted: true)]
+        case "3":
+            return [.init(x: 0, y: 0.18), .init(x: 0, y: 0.50), .init(x: 0, y: 0.82, isInverted: true)]
+        case "4":
+            return pairedRows([0.22, 0.78])
+        case "5":
+            return pairedRows([0.22, 0.78]) + [.init(x: 0, y: 0.50)]
+        case "6":
+            return pairedRows([0.18, 0.50, 0.82])
+        case "7":
+            return [.init(x: 0, y: 0.12)] + pairedRows([0.28, 0.56, 0.82])
+        case "8":
+            return pairedRows([0.14, 0.36, 0.64, 0.86])
+        case "9":
+            return pairedRows([0.14, 0.34, 0.66, 0.86]) + [.init(x: 0, y: 0.50)]
+        case "10":
+            return [.init(x: 0, y: 0.12), .init(x: 0, y: 0.88, isInverted: true)] + pairedRows([0.26, 0.50, 0.74])
+        default:
+            return []
+        }
+    }
+
+    private func pairedRows(_ rows: [CGFloat]) -> [CardPip] {
+        rows.flatMap { y in
+            [
+                CardPip(x: -0.26, y: y, isInverted: y > 0.5),
+                CardPip(x: 0.26, y: y, isInverted: y > 0.5)
+            ]
+        }
+    }
+}
+
+private struct CardPip: Identifiable {
+    let id = UUID()
+    let x: CGFloat
+    let y: CGFloat
+    let isInverted: Bool
+
+    init(x: CGFloat, y: CGFloat, isInverted: Bool = false) {
+        self.x = x
+        self.y = y
+        self.isInverted = isInverted
+    }
+}
+
+private enum CardSuit: String {
+    case spades
+    case hearts
+    case diamonds
+    case clubs
+
+    var symbol: String {
+        switch self {
+        case .spades: "♠"
+        case .hearts: "♥"
+        case .diamonds: "♦"
+        case .clubs: "♣"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .hearts, .diamonds:
+            Color(red: 0.73, green: 0.09, blue: 0.13)
+        case .spades, .clubs:
+            Color(red: 0.1, green: 0.1, blue: 0.13)
+        }
+    }
+}
+
+private struct StandardCardFaceView: View {
+    let face: StandardCardFace
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            let cornerRankSize = max(size.width * 0.22, 12)
+            let cornerSuitSize = max(size.width * 0.16, 10)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                    }
+
+                VStack {
+                    HStack(alignment: .top) {
+                        cornerMark(rankSize: cornerRankSize, suitSize: cornerSuitSize)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.top, size.height * 0.08)
+                    .padding(.leading, size.width * 0.1)
+
+                    Spacer(minLength: 0)
+
+                    centerArtwork(in: size)
+
+                    Spacer(minLength: 0)
+
+                    HStack(alignment: .bottom) {
+                        Spacer(minLength: 0)
+                        cornerMark(rankSize: cornerRankSize, suitSize: cornerSuitSize)
+                            .rotationEffect(.degrees(180))
+                    }
+                    .padding(.bottom, size.height * 0.08)
+                    .padding(.trailing, size.width * 0.1)
                 }
-                #elseif canImport(AppKit)
-                if let image = NSImage(contentsOf: url) {
-                    return image
-                }
-                #endif
             }
         }
+    }
 
-        return nil
+    @ViewBuilder
+    private func centerArtwork(in size: CGSize) -> some View {
+        if face.rank == "A" {
+            Text(face.suit.symbol)
+                .font(.system(size: min(size.width * 0.42, size.height * 0.34), weight: .regular, design: .serif))
+                .foregroundStyle(face.suit.color)
+        } else if face.isFaceCard {
+            faceCardArtwork(in: size)
+        } else {
+            numberCardArtwork(in: size)
+        }
+    }
+
+    private func numberCardArtwork(in size: CGSize) -> some View {
+        ZStack {
+            ForEach(face.pipLayout) { pip in
+                Text(face.suit.symbol)
+                    .font(.system(size: min(size.width * 0.17, size.height * 0.105), weight: .regular, design: .serif))
+                    .foregroundStyle(face.suit.color)
+                    .rotationEffect(pip.isInverted ? .degrees(180) : .zero)
+                    .position(
+                        x: size.width * (0.50 + pip.x),
+                        y: size.height * (0.16 + pip.y * 0.68)
+                    )
+            }
+        }
+    }
+
+    private func faceCardArtwork(in size: CGSize) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(face.suit.color.opacity(0.06))
+                .frame(width: size.width * 0.60, height: size.height * 0.64)
+
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(face.suit.color.opacity(0.22), lineWidth: 1)
+                .frame(width: size.width * 0.60, height: size.height * 0.64)
+
+            VStack(spacing: 0) {
+                courtHalf(in: size)
+                    .frame(height: size.height * 0.24)
+
+                ZStack {
+                    Capsule()
+                        .fill(face.suit.color.opacity(0.10))
+                        .frame(width: size.width * 0.34, height: size.height * 0.09)
+
+                    Text(face.suit.symbol)
+                        .font(.system(size: min(size.width * 0.16, size.height * 0.10), weight: .regular, design: .serif))
+                        .foregroundStyle(face.suit.color)
+                }
+                .padding(.vertical, size.height * 0.02)
+
+                courtHalf(in: size)
+                    .rotationEffect(.degrees(180))
+                    .frame(height: size.height * 0.24)
+            }
+        }
+    }
+
+    private func courtHalf(in size: CGSize) -> some View {
+        HStack(spacing: size.width * 0.04) {
+            VStack(spacing: size.height * 0.008) {
+                Text(face.rank)
+                    .font(.system(size: min(size.width * 0.17, size.height * 0.10), weight: .bold, design: .serif))
+                    .foregroundStyle(face.suit.color)
+
+                Text(face.suit.symbol)
+                    .font(.system(size: min(size.width * 0.11, size.height * 0.07), weight: .regular, design: .serif))
+                    .foregroundStyle(face.suit.color)
+            }
+            .frame(width: size.width * 0.11)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(face.suit.color.opacity(0.18), lineWidth: 1)
+                    }
+
+                VStack(spacing: size.height * 0.004) {
+                    Text(face.courtTitle)
+                        .font(.system(size: min(size.width * 0.07, size.height * 0.042), weight: .bold, design: .serif))
+                        .tracking(0.6)
+                        .foregroundStyle(face.suit.color.opacity(0.82))
+
+                    Text(face.courtSymbol)
+                        .font(.system(size: min(size.width * 0.13, size.height * 0.08), weight: .regular, design: .serif))
+                        .foregroundStyle(face.suit.color)
+
+                    Text(face.suit.symbol)
+                        .font(.system(size: min(size.width * 0.14, size.height * 0.09), weight: .regular, design: .serif))
+                        .foregroundStyle(face.suit.color)
+                }
+                .padding(.vertical, size.height * 0.01)
+            }
+            .frame(width: size.width * 0.34, height: size.height * 0.18)
+        }
+    }
+
+    private func cornerMark(rankSize: CGFloat, suitSize: CGFloat) -> some View {
+        VStack(spacing: -2) {
+            Text(face.rank)
+                .font(.system(size: rankSize, weight: .bold, design: .serif))
+                .foregroundStyle(face.suit.color)
+                .minimumScaleFactor(0.65)
+            Text(face.suit.symbol)
+                .font(.system(size: suitSize, weight: .regular, design: .serif))
+                .foregroundStyle(face.suit.color)
+        }
+        .lineLimit(1)
     }
 }
 
 private enum CardBackStyle: String, CaseIterable, Identifiable {
-    case mondrian
-    case flames
-    case honeycomb
-    case diamonds
-    case dots
+    case classicBlue
+    case classicRed
+    case blueCrosshatch
+    case redCrosshatch
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .mondrian:
-            "グリッド"
-        case .flames:
-            "フレイム"
-        case .honeycomb:
-            "ハニカム"
-        case .diamonds:
-            "ダイヤ"
-        case .dots:
-            "ドット"
+        case .classicBlue:
+            "青ダイヤ"
+        case .classicRed:
+            "赤ダイヤ"
+        case .blueCrosshatch:
+            "青格子"
+        case .redCrosshatch:
+            "赤格子"
         }
     }
-}
 
-private struct CardBackPickerOverlay: View {
-    let selectedStyle: CardBackStyle
-    let onSelect: (CardBackStyle) -> Void
-
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 14), count: 2)
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.45)
-                .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 14) {
-                Text("カード裏面を選択")
-                    .font(.headline.bold())
-                    .foregroundStyle(.white)
-
-                Text("ゲーム開始前に1つ選んでください")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.76))
-
-                LazyVGrid(columns: columns, spacing: 14) {
-                    ForEach(CardBackStyle.allCases) { style in
-                        Button {
-                            onSelect(style)
-                        } label: {
-                            VStack(spacing: 8) {
-                                CardBackDesignView(style: style)
-                                    .frame(height: 130)
-                                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 16)
-                                            .stroke(selectedStyle == style ? Color.white : .white.opacity(0.22), lineWidth: selectedStyle == style ? 3 : 1)
-                                    }
-
-                                Text(style.title)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.white)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-            .padding(18)
-            .background(Color.black.opacity(0.36))
-            .clipShape(RoundedRectangle(cornerRadius: 22))
-            .padding(18)
-        }
+    static func randomStyle() -> CardBackStyle {
+        allCases.randomElement() ?? .classicBlue
     }
 }
 
@@ -529,21 +867,187 @@ private struct CardBackDesignView: View {
 
             ZStack {
                 switch style {
-                case .mondrian:
-                    MondrianBackView(size: size)
-                case .flames:
-                    FlameBackView(size: size)
-                case .honeycomb:
-                    HoneycombBackView(size: size)
-                case .diamonds:
-                    DiamondBackView(size: size)
-                case .dots:
-                    DotBackView(size: size)
+                case .classicBlue:
+                    ClassicBlueBackView(size: size)
+                case .classicRed:
+                    ClassicRedBackView(size: size)
+                case .blueCrosshatch:
+                    BlueCrosshatchBackView(size: size)
+                case .redCrosshatch:
+                    RedCrosshatchBackView(size: size)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .padding(4)
+    }
+}
+
+private struct ClassicBlueBackView: View {
+    let size: CGSize
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.08, green: 0.23, blue: 0.58),
+                    Color(red: 0.12, green: 0.31, blue: 0.69)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            RoundedRectangle(cornerRadius: 12)
+                .inset(by: size.width * 0.05)
+                .stroke(Color.white.opacity(0.95), lineWidth: max(size.width * 0.018, 2))
+
+            RoundedRectangle(cornerRadius: 10)
+                .inset(by: size.width * 0.11)
+                .stroke(Color.white.opacity(0.65), lineWidth: max(size.width * 0.01, 1))
+
+            ClassicDiamondLattice()
+                .stroke(Color.white.opacity(0.35), lineWidth: max(size.width * 0.008, 0.8))
+                .padding(size.width * 0.12)
+
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(0.14))
+                    .frame(width: size.width * 0.30)
+
+                Circle()
+                    .stroke(Color.white.opacity(0.85), lineWidth: max(size.width * 0.012, 1.5))
+                    .frame(width: size.width * 0.24)
+
+                Text("◆")
+                    .font(.system(size: size.width * 0.13, weight: .bold, design: .serif))
+                    .foregroundStyle(Color.white.opacity(0.92))
+            }
+        }
+    }
+}
+
+private struct ClassicRedBackView: View {
+    let size: CGSize
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.60, green: 0.10, blue: 0.12),
+                    Color(red: 0.74, green: 0.16, blue: 0.18)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            RoundedRectangle(cornerRadius: 12)
+                .inset(by: size.width * 0.05)
+                .stroke(Color.white.opacity(0.95), lineWidth: max(size.width * 0.018, 2))
+
+            RoundedRectangle(cornerRadius: 10)
+                .inset(by: size.width * 0.11)
+                .stroke(Color.white.opacity(0.65), lineWidth: max(size.width * 0.01, 1))
+
+            ClassicDiamondLattice()
+                .stroke(Color.white.opacity(0.35), lineWidth: max(size.width * 0.008, 0.8))
+                .padding(size.width * 0.12)
+        }
+    }
+}
+
+private struct BlueCrosshatchBackView: View {
+    let size: CGSize
+
+    var body: some View {
+        ZStack {
+            Color(red: 0.10, green: 0.28, blue: 0.66)
+
+            RoundedRectangle(cornerRadius: 12)
+                .inset(by: size.width * 0.05)
+                .stroke(Color.white.opacity(0.95), lineWidth: max(size.width * 0.018, 2))
+
+            CrosshatchPattern()
+                .stroke(Color.white.opacity(0.28), lineWidth: max(size.width * 0.008, 0.8))
+                .padding(size.width * 0.13)
+
+            RoundedRectangle(cornerRadius: 9)
+                .inset(by: size.width * 0.18)
+                .stroke(Color.white.opacity(0.65), lineWidth: max(size.width * 0.01, 1))
+        }
+    }
+}
+
+private struct RedCrosshatchBackView: View {
+    let size: CGSize
+
+    var body: some View {
+        ZStack {
+            Color(red: 0.66, green: 0.14, blue: 0.16)
+
+            RoundedRectangle(cornerRadius: 12)
+                .inset(by: size.width * 0.05)
+                .stroke(Color.white.opacity(0.95), lineWidth: max(size.width * 0.018, 2))
+
+            CrosshatchPattern()
+                .stroke(Color.white.opacity(0.28), lineWidth: max(size.width * 0.008, 0.8))
+                .padding(size.width * 0.13)
+
+            RoundedRectangle(cornerRadius: 9)
+                .inset(by: size.width * 0.18)
+                .stroke(Color.white.opacity(0.65), lineWidth: max(size.width * 0.01, 1))
+        }
+    }
+}
+
+private struct ClassicDiamondLattice: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let columns = 7
+        let rows = 10
+        let cellWidth = rect.width / CGFloat(columns)
+        let cellHeight = rect.height / CGFloat(rows)
+        let diamondWidth = cellWidth * 0.58
+        let diamondHeight = cellHeight * 0.58
+
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let center = CGPoint(
+                    x: cellWidth * (CGFloat(column) + 0.5),
+                    y: cellHeight * (CGFloat(row) + 0.5)
+                )
+
+                path.move(to: CGPoint(x: center.x, y: center.y - diamondHeight / 2))
+                path.addLine(to: CGPoint(x: center.x + diamondWidth / 2, y: center.y))
+                path.addLine(to: CGPoint(x: center.x, y: center.y + diamondHeight / 2))
+                path.addLine(to: CGPoint(x: center.x - diamondWidth / 2, y: center.y))
+                path.closeSubpath()
+            }
+        }
+
+        return path
+    }
+}
+
+private struct CrosshatchPattern: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let spacing = max(rect.width / 12, 8)
+        var x = -rect.height
+
+        while x < rect.width + rect.height {
+            path.move(to: CGPoint(x: x, y: 0))
+            path.addLine(to: CGPoint(x: x + rect.height, y: rect.height))
+            x += spacing
+        }
+
+        x = 0
+        while x < rect.width + rect.height {
+            path.move(to: CGPoint(x: x, y: 0))
+            path.addLine(to: CGPoint(x: x - rect.height, y: rect.height))
+            x += spacing
+        }
+
+        return path
     }
 }
 
@@ -888,14 +1392,14 @@ private enum GameDifficulty: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    var columnCount: Int {
+    func columnCount(isLandscape: Bool) -> Int {
         switch self {
         case .beginner:
-            4
+            isLandscape ? 6 : 4
         case .intermediate:
-            4
+            isLandscape ? 8 : 4
         case .advanced:
-            5
+            isLandscape ? 10 : 5
         }
     }
 }
@@ -903,6 +1407,7 @@ private enum GameDifficulty: String, CaseIterable, Identifiable, Codable {
 private struct GameLayout {
     let columns: [GridItem]
     let spacing: CGFloat
+    let cardWidth: CGFloat
     let cardHeight: CGFloat
 }
 
@@ -922,6 +1427,102 @@ private struct GameStatistics {
         summaries = GameDifficulty.allCases.map { difficulty in
             DifficultySummary(difficulty: difficulty, history: history.filter { $0.difficulty == difficulty })
         }
+    }
+}
+
+private struct CompletionFeedback {
+    let message: String
+    let tone: CompletionMessageTone
+}
+
+private enum CompletionMessageTone {
+    case celebration
+    case positive
+    case warning
+    case neutral
+
+    var backgroundColor: Color {
+        switch self {
+        case .celebration:
+            Color.yellow.opacity(0.22)
+        case .positive:
+            Color.green.opacity(0.22)
+        case .warning:
+            Color.orange.opacity(0.24)
+        case .neutral:
+            Color.white.opacity(0.14)
+        }
+    }
+
+    var borderColor: Color {
+        switch self {
+        case .celebration:
+            Color.yellow.opacity(0.9)
+        case .positive:
+            Color.green.opacity(0.9)
+        case .warning:
+            Color.orange.opacity(0.9)
+        case .neutral:
+            Color.white.opacity(0.5)
+        }
+    }
+}
+
+private struct CompletionMessageBanner: View {
+    let message: String
+    let tone: CompletionMessageTone
+
+    var body: some View {
+        Text(message)
+            .font(.headline.weight(.bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(tone.backgroundColor)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(tone.borderColor, lineWidth: 2)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, 18)
+    }
+}
+
+private struct ConfettiOverlay: View {
+    private let colors: [Color] = [.yellow, .pink, .cyan, .green, .orange, .white]
+    @State private var animate = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                ForEach(0..<32, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(colors[index % colors.count])
+                        .frame(width: index.isMultiple(of: 3) ? 8 : 6, height: 14)
+                        .rotationEffect(.degrees(animate ? Double(index * 37) : Double(index * 12)))
+                        .position(
+                            x: geometry.size.width * xPosition(for: index),
+                            y: animate ? geometry.size.height + 40 : -20
+                        )
+                        .animation(
+                            .easeIn(duration: 1.8)
+                                .delay(Double(index) * 0.03),
+                            value: animate
+                        )
+                }
+            }
+            .onAppear {
+                animate = false
+                animate = true
+            }
+        }
+    }
+
+    private func xPosition(for index: Int) -> CGFloat {
+        let values: [CGFloat] = [0.06, 0.12, 0.18, 0.24, 0.31, 0.37, 0.43, 0.49, 0.55, 0.61, 0.68, 0.74, 0.80, 0.86, 0.92]
+        return values[index % values.count]
     }
 }
 
